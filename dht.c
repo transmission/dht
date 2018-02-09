@@ -288,6 +288,7 @@ static int parse_message(const unsigned char *buf, int buflen,
                          unsigned char *info_hash_return,
                          unsigned char *target_return,
                          unsigned short *port_return,
+                         int *implied_port_return,
                          unsigned char *token_return, int *token_len,
                          unsigned char *nodes_return, int *nodes_len,
                          unsigned char *nodes6_return, int *nodes6_len,
@@ -296,11 +297,6 @@ static int parse_message(const unsigned char *buf, int buflen,
                          int *want_return);
 
 static const unsigned char zeroes[20] = {0};
-static const unsigned char ones[20] = {
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF
-};
 static const unsigned char v4prefix[16] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0
 };
@@ -1626,7 +1622,7 @@ dht_dump_tables(FILE *f)
             if(n->pinged)
                 fprintf(f, " (%d)", n->pinged);
             fprintf(f, "%s%s.\n",
-                    find_node(n->id, AF_INET) ? " (known)" : "",
+                    find_node(n->id, sr->af) ? " (known)" : "",
                     n->replied ? " (replied)" : "");
         }
         sr = sr->next;
@@ -1939,6 +1935,7 @@ dht_periodic(const void *buf, size_t buflen,
         int tid_len = 16, token_len = 128;
         int nodes_len = 26*16, nodes6_len = 38*16;
         unsigned short port;
+        int implied_port;
         unsigned char values[2048], values6[2048];
         int values_len = 2048, values6_len = 2048;
         int want;
@@ -1959,7 +1956,7 @@ dht_periodic(const void *buf, size_t buflen,
         }
 
         message = parse_message(buf, buflen, tid, &tid_len, id, info_hash,
-                                target, &port, token, &token_len,
+                                target, &port, &implied_port, token, &token_len,
                                 nodes, &nodes_len, nodes6, &nodes6_len,
                                 values, &values_len, values6, &values6_len,
                                 &want);
@@ -2159,6 +2156,26 @@ dht_periodic(const void *buf, size_t buflen,
                            203, "Announce_peer with wrong token");
                 break;
             }
+            if(implied_port != 0) {
+                if(port != 0) {
+                    debugf("Both port and implied_port.\n");
+                    /* But continue, that's what the spec says. */
+                }
+                switch(from->sa_family) {
+                case AF_INET:
+                    port = htons(((struct sockaddr_in*)from)->sin_port);
+                    debugf("Announce_peer: AF_INET implied_port %d.\n", port);
+                    break;
+                case AF_INET6:
+                    port = htons(((struct sockaddr_in6*)from)->sin6_port);
+                    debugf("Announce_peer: AF_INET6 implied_port %d.\n", port);
+                    break;
+                default:
+                    port = 0;
+                    debugf("Announce_peer: unsupported sa_family! implied port set zero.\n");
+                    break;
+                }
+            }
             if(port == 0) {
                 debugf("Announce_peer with forbidden port %d.\n", port);
                 send_error(from, fromlen, tid, tid_len,
@@ -2335,7 +2352,7 @@ dht_insert_node(const unsigned char *id, struct sockaddr *sa, int salen)
         return -1;
     }
 
-    n = new_node(id, (struct sockaddr*)sa, salen, 0);
+    n = new_node(id, sa, salen, 0);
     return !!n;
 }
 
@@ -2787,6 +2804,7 @@ parse_message(const unsigned char *buf, int buflen,
               unsigned char *tid_return, int *tid_len,
               unsigned char *id_return, unsigned char *info_hash_return,
               unsigned char *target_return, unsigned short *port_return,
+              int *implied_port_return,
               unsigned char *token_return, int *token_len,
               unsigned char *nodes_return, int *nodes_len,
               unsigned char *nodes6_return, int *nodes6_len,
@@ -2838,17 +2856,30 @@ parse_message(const unsigned char *buf, int buflen,
         }
     }
     if(port_return) {
-        p = dht_memmem(buf, buflen, "porti", 5);
+        p = dht_memmem(buf, buflen, "4:porti", 7);
         if(p) {
             long l;
             char *q;
-            l = strtol((char*)p + 5, &q, 10);
+            l = strtol((char*)p + 7, &q, 10);
             if(q && *q == 'e' && l > 0 && l < 0x10000)
                 *port_return = l;
             else
                 *port_return = 0;
         } else
             *port_return = 0;
+    }
+    if(implied_port_return) {
+        p = dht_memmem(buf, buflen, "12:implied_porti", 16);
+        if(p) {
+            long l;
+            char *q;
+            l = strtol((char*)p + 16, &q, 10);
+            if(q && *q == 'e' && l > 0 && l < 0x10000)
+                *implied_port_return = l;
+            else
+                *implied_port_return = 0;
+        } else
+            *implied_port_return = 0;
     }
     if(target_return) {
         p = dht_memmem(buf, buflen, "6:target20:", 11);
